@@ -110,7 +110,7 @@ def test_recommendations_exclude_inactive_and_disliked_attributes(
     assert response.status_code == 200
     body = response.json()
     assert body["excluded_products"]
-    assert any(item["reason_code"] in {"disliked_attribute", "inactive_product"} for item in body["excluded_products"]) 
+    assert any(item["reason_code"] in {"disliked_attribute", "inactive_product"} for item in body["excluded_products"])
 
 
 def test_recommendations_can_hide_explanations(client: TestClient, sample_profile_payload: dict) -> None:
