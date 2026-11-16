@@ -1,0 +1,52 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap');
+@import 'tailwindcss';
+
+/*
+  Quiet Commerce design system
+  ----------------------------
+  Warm ivory ground, white surfaces, deep navy type, muted sage accents.
+  Typography: Manrope (UI) + Source Serif 4 (display moments only).
+*/
+
+@theme {
+  --font-sans: 'Manrope', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Source Serif 4', 'Times New Roman', serif;
+
+  --color-ivory: #f7f4ef;
+  --color-ivory-deep: #efeae2;
+  --color-surface: #ffffff;
+  --color-navy: #1a2433;
+  --color-navy-muted: #3d4a5c;
+  --color-sage: #5f7a6a;
+  --color-sage-soft: #d8e3dc;
+  --color-sage-strong: #4a6356;
+  --color-border: #e4ddd3;
+  --color-border-strong: #d0c7ba;
+  --color-danger: #9b3d3d;
+  --color-success: #3f6b52;
+
+  --shadow-soft: 0 1px 2px rgb(26 36 51 / 0.04), 0 8px 24px rgb(26 36 51 / 0.04);
+}
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply m-0 min-h-screen bg-ivory font-sans text-navy;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 100% -20%, rgb(216 227 220 / 0.45), transparent),
+      radial-gradient(ellipse 60% 40% at 0% 100%, rgb(239 234 226 / 0.9), transparent);
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+
+  h1,
+  h2,
+  .font-display {
+    font-family: var(--font-display);
+  }
+}
