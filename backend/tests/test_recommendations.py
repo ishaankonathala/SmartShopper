@@ -1,5 +1,6 @@
 """Recommendation engine tests."""
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -287,6 +288,40 @@ def test_recommendation_generation_does_not_mutate_saved_dna(
     assert response.status_code == 200
     after = seeded_client.get(f"/api/profiles/{user_id}/dna").json()
     assert before == after
+
+
+def test_battery_preference_override_is_full_confidence_and_temporary(
+    seeded_client: TestClient,
+    sample_profile_payload: dict,
+    db_session: Session,
+) -> None:
+    from app.schemas.recommendation import RecommendationRequest
+    from app.services.recommendation import DIMENSION_WEIGHTS, generate_recommendations
+
+    user_id = _create_user(seeded_client, sample_profile_payload)
+    profile_before = seeded_client.get(f"/api/profiles/{user_id}").json()
+    dna_before = seeded_client.get(f"/api/profiles/{user_id}/dna").json()
+    request = RecommendationRequest(user_id=user_id, category="Headphones", limit=10)
+
+    baseline = generate_recommendations(db_session, request)
+    simulated = generate_recommendations(
+        db_session,
+        request,
+        preference_overrides={"battery_life_priority": 100},
+    )
+    baseline_product = next(item for item in baseline.products if item.product_id == "SS-HP-001")
+    simulated_product = next(item for item in simulated.products if item.product_id == "SS-HP-001")
+    battery_feature = simulated_product.attribute_breakdown["battery_life_priority"]
+
+    assert simulated_product.score_breakdown["battery_life_priority"] == pytest.approx(
+        round(battery_feature * DIMENSION_WEIGHTS["battery_life_priority"], 2)
+    )
+    assert simulated_product.score_breakdown["battery_life_priority"] > (
+        baseline_product.score_breakdown["battery_life_priority"]
+    )
+    assert simulated_product.confidence > baseline_product.confidence
+    assert seeded_client.get(f"/api/profiles/{user_id}").json() == profile_before
+    assert seeded_client.get(f"/api/profiles/{user_id}/dna").json() == dna_before
 
 
 def test_invalid_limit_is_rejected(client: TestClient, sample_profile_payload: dict) -> None:

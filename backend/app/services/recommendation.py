@@ -31,7 +31,11 @@ DIMENSION_WEIGHTS: dict[str, float] = {
 }
 
 DIMENSION_ORDER: tuple[str, ...] = tuple(PREFERENCE_DIMENSIONS)
-PreferenceOverrideDimension = Literal["comfort_priority", "brand_loyalty"]
+PreferenceOverrideDimension = Literal[
+    "comfort_priority",
+    "brand_loyalty",
+    "battery_life_priority",
+]
 
 
 def _clamp(value: float, *, low: float = 0.0, high: float = 100.0) -> float:
@@ -337,7 +341,11 @@ def generate_recommendations(
 ) -> RecommendationResponse:
     """Generate deterministic, explainable product recommendations for a user."""
     overrides = dict(preference_overrides or {})
-    unsupported_dimensions = set(overrides) - {"comfort_priority", "brand_loyalty"}
+    unsupported_dimensions = set(overrides) - {
+        "comfort_priority",
+        "brand_loyalty",
+        "battery_life_priority",
+    }
     if unsupported_dimensions:
         raise ValueError(f"Unsupported recommendation preference overrides: {sorted(unsupported_dimensions)}")
 
