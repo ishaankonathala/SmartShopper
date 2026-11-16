@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -29,13 +31,21 @@ DIMENSION_WEIGHTS: dict[str, float] = {
 }
 
 DIMENSION_ORDER: tuple[str, ...] = tuple(PREFERENCE_DIMENSIONS)
+PreferenceOverrideDimension = Literal["comfort_priority", "brand_loyalty"]
 
 
 def _clamp(value: float, *, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
 
 
-def _effective_dna_value(dna: ShopperDNA | None, dimension: str) -> float:
+def _effective_dna_value(
+    dna: ShopperDNA | None,
+    dimension: str,
+    preference_overrides: Mapping[PreferenceOverrideDimension, int],
+) -> float:
+    if dimension in preference_overrides:
+        return _clamp(float(preference_overrides[dimension]))
+
     if dna is None:
         return 50.0
 
@@ -229,6 +239,7 @@ def _score_product(
     requested_category: str | None,
     battery_max_hours: float | None,
     include_explanations: bool,
+    preference_overrides: Mapping[PreferenceOverrideDimension, int],
 ) -> RecommendedProduct:
     reasons: list[str] = []
     attribute_breakdown: dict[str, float] = {}
@@ -258,15 +269,18 @@ def _score_product(
         active_weights[dimension] = weight
         attribute_breakdown[dimension] = round(_clamp(feature_value), 2)
 
-        effective_value = _effective_dna_value(dna, dimension)
+        effective_value = _effective_dna_value(dna, dimension, preference_overrides)
         contribution = (feature_value / 100.0) * (effective_value / 100.0) * 100.0
         score_breakdown[dimension] = round(contribution * weight, 2)
 
-        source = (dna.preference_sources.get(dimension, "default") if dna else "default")
-        if source == "default":
-            confidence_value = 0.0
+        if dimension in preference_overrides:
+            confidence_value = 100.0
         else:
-            confidence_value = float(dna.confidence_scores.get(dimension, 0)) if dna else 0.0
+            source = (dna.preference_sources.get(dimension, "default") if dna else "default")
+            if source == "default":
+                confidence_value = 0.0
+            else:
+                confidence_value = float(dna.confidence_scores.get(dimension, 0)) if dna else 0.0
         active_confidences[dimension] = confidence_value
 
         if dimension == "comfort_priority" and feature_value >= 75:
@@ -317,8 +331,16 @@ def _score_product(
 def generate_recommendations(
     db: Session,
     request: RecommendationRequest,
+    *,
+    preference_overrides: Mapping[PreferenceOverrideDimension, int] | None = None,
+    product_snapshot: Sequence[Product] | None = None,
 ) -> RecommendationResponse:
     """Generate deterministic, explainable product recommendations for a user."""
+    overrides = dict(preference_overrides or {})
+    unsupported_dimensions = set(overrides) - {"comfort_priority", "brand_loyalty"}
+    if unsupported_dimensions:
+        raise ValueError(f"Unsupported recommendation preference overrides: {sorted(unsupported_dimensions)}")
+
     profile = db.get(UserProfile, request.user_id)
     if profile is None:
         raise HTTPException(
@@ -341,8 +363,11 @@ def generate_recommendations(
     )
     requested_category = request.effective_category
 
-    stmt = select(Product)
-    all_products = list(db.scalars(stmt).all())
+    if product_snapshot is None:
+        stmt = select(Product)
+        all_products = list(db.scalars(stmt).all())
+    else:
+        all_products = product_snapshot
     candidate_count = len(all_products)
 
     battery_max_hours = 0.0
@@ -383,6 +408,7 @@ def generate_recommendations(
                 requested_category=requested_category,
                 battery_max_hours=battery_max_hours,
                 include_explanations=request.include_explanations,
+                preference_overrides=overrides,
             )
         )
 
