@@ -18,7 +18,6 @@ from app.services.assistant_response import (
     CHECK_PRODUCT_ID_ORDER_MISMATCH,
     CHECK_PRODUCT_ID_UNKNOWN,
     CHECK_PRODUCT_IDENTITY_REPEATED,
-    CHECK_SUMMARY_NOT_GROUNDED,
     CHECK_UNSUPPORTED_REQUIREMENT_MENTIONED,
     CHECK_UNSUPPORTED_PRODUCT_CLAIM,
     DEMO_CATALOGUE_DISCLAIMER,
@@ -173,10 +172,45 @@ def _mock_groq_client(
                             ),
                             "Fits within your budget.",
                         )
+                elif explanation_mode == "hallucinated_product_name":
+                    explanations[0]["explanation"] = (
+                        "These results are better than Galaxy Ultra."
+                    )
+                elif explanation_mode == "invented_lowercase_name":
+                    explanations[0]["explanation"] = "These results include galaxy ultra."
+                elif explanation_mode == "unsupported_claim":
+                    explanations[0]["explanation"] = (
+                        "These options are wireless and available now."
+                    )
+                elif explanation_mode.startswith(("product_", "brand_")):
+                    identity_type, casing = explanation_mode.split("_", maxsplit=1)
+                    identity = data["recommendations"][0][
+                        "name" if identity_type == "product" else "brand"
+                    ]
+                    if casing == "lower":
+                        identity = identity.lower()
+                    elif casing == "upper":
+                        identity = identity.upper()
+                    else:
+                        identity = "".join(
+                            character.upper() if index % 2 else character.lower()
+                            for index, character in enumerate(identity)
+                        )
+                    explanations[0]["explanation"] = f"These results include {identity}."
+                elif explanation_mode == "unsupported_durability":
+                    explanations[0]["explanation"] = "These options are durable."
+                elif explanation_mode == "unsupported_performance":
+                    explanations[0]["explanation"] = "These options deliver fast performance."
+                elif explanation_mode == "unsupported_feature":
+                    explanations[0]["explanation"] = "These options include a touchscreen."
                 response_data = {
                     "summary": "These results reflect the requested category and priorities.",
                     "product_explanations": explanations,
                 }
+                if explanation_mode == "ungrounded_summary":
+                    response_data["summary"] = (
+                        "These headphones are waterproof, available, and cost 999."
+                    )
                 if explanation_mode == "missing_fields":
                     del response_data["summary"]
                 elif explanation_mode == "incorrect_field_type":
@@ -199,21 +233,6 @@ def _mock_groq_client(
                     response_data["summary"] = "These results include galaxy ultra."
                 elif explanation_mode == "unsupported_claim":
                     response_data["summary"] = "These options are wireless and available now."
-                elif explanation_mode.startswith(("product_", "brand_")):
-                    identity_type, casing = explanation_mode.split("_", maxsplit=1)
-                    identity = data["recommendations"][0][
-                        "name" if identity_type == "product" else "brand"
-                    ]
-                    if casing == "lower":
-                        identity = identity.lower()
-                    elif casing == "upper":
-                        identity = identity.upper()
-                    else:
-                        identity = "".join(
-                            character.upper() if index % 2 else character.lower()
-                            for index, character in enumerate(identity)
-                        )
-                    response_data["summary"] = f"These results include {identity}."
                 elif explanation_mode == "unsupported_durability":
                     response_data["summary"] = "These options are durable."
                 elif explanation_mode == "unsupported_performance":
@@ -324,7 +343,7 @@ def test_explanation_grounded_in_recommendation_reason_is_accepted(
     assert DEMO_CATALOGUE_DISCLAIMER in response.answer
 
 
-def test_ungrounded_model_summary_is_rejected() -> None:
+def test_ungrounded_model_summary_is_ignored_when_not_rendered() -> None:
     product = _pulsebuds()
     raw = json.dumps(
         {
@@ -338,10 +357,40 @@ def test_ungrounded_model_summary_is_rejected() -> None:
         }
     )
 
-    with pytest.raises(ExplanationCheckError) as info:
-        _validate_explanation(raw, [product], AssistantIntent(category="Headphones"))
+    explanation = _validate_explanation(
+        raw,
+        [product],
+        AssistantIntent(category="Headphones"),
+    )
 
-    assert info.value.code == CHECK_UNSUPPORTED_PRODUCT_CLAIM
+    assert explanation.summary == "These headphones have exceptional noise cancellation."
+    assert explanation.product_explanations[0].explanation == "Fits within your budget."
+
+
+def test_api_ignores_ungrounded_summary_and_renders_deterministic_heading(
+    seeded_client,
+    sample_profile_payload: dict,
+    db_session: Session,
+) -> None:
+    user_id = _create_user(seeded_client, sample_profile_payload)
+    groq_client, _ = _mock_groq_client(
+        AssistantIntent(category="Headphones"),
+        explanation_mode="ungrounded_summary",
+    )
+
+    response = generate_assistant_response(
+        db_session,
+        AssistantChatRequest(user_id=user_id, message="Headphones."),
+        groq_client=groq_client,
+    )
+
+    assert response.fallback_used is False
+    assert response.answer.startswith(
+        "These results reflect the ranked recommendations and their stated reasons:"
+    )
+    assert "waterproof" not in response.answer
+    assert "available" not in response.answer
+    assert "cost exactly 999 dollars" not in response.answer
 
 
 def test_explanation_accepts_exact_reason_wording() -> None:
@@ -919,15 +968,15 @@ def test_grounding_normalizes_only_explicit_word_forms(
     )
 
 
-def test_summary_word_form_normalization_does_not_allow_unsupported_claims() -> None:
-    with pytest.raises(ExplanationCheckError) as info:
-        _validate_pulsebuds(
-            "Fits within your budget.",
-            summary="Fit within your budget. It is durable.",
-            reasons=["Fits within your budget."],
-        )
+def test_unrendered_ungrounded_summary_does_not_override_product_validation() -> None:
+    explanation = _validate_pulsebuds(
+        "Fits within your budget.",
+        summary="Fit within your budget. It is durable.",
+        reasons=["Fits within your budget."],
+    )
 
-    assert info.value.code == CHECK_SUMMARY_NOT_GROUNDED
+    assert explanation.summary == "Fit within your budget. It is durable."
+    assert explanation.product_explanations[0].explanation == "Fits within your budget."
 
 
 @pytest.mark.parametrize("separator", [". ", "; ", "\n"])
@@ -946,14 +995,13 @@ def test_invented_claim_between_valid_claims_is_rejected(separator: str) -> None
     assert info.value.code == CHECK_PRODUCT_EXPLANATION_NOT_GROUNDED
 
 
-def test_invented_claim_in_summary_between_valid_claims_is_rejected() -> None:
-    with pytest.raises(ExplanationCheckError) as info:
-        _validate_pulsebuds(
-            "Fits within your budget",
-            summary="Fits within your budget. It is durable. Matches your priorities.",
-        )
+def test_invented_claim_in_unrendered_summary_is_ignored() -> None:
+    explanation = _validate_pulsebuds(
+        "Fits within your budget",
+        summary="Fits within your budget. It is durable. Matches your priorities.",
+    )
 
-    assert info.value.code == CHECK_SUMMARY_NOT_GROUNDED
+    assert "durable" in explanation.summary
 
 
 def test_brand_named_in_a_supplied_reason_may_be_repeated() -> None:
@@ -970,14 +1018,13 @@ def test_brand_absent_from_all_supplied_reasons_is_rejected() -> None:
     assert info.value.code == CHECK_PRODUCT_IDENTITY_REPEATED
 
 
-def test_unsupplied_brand_in_summary_is_rejected() -> None:
-    with pytest.raises(ExplanationCheckError) as info:
-        _validate_pulsebuds(
-            "Fits within your budget.",
-            summary="These results come from AudioNova.",
-        )
+def test_unsupplied_brand_in_unrendered_summary_is_ignored() -> None:
+    explanation = _validate_pulsebuds(
+        "Fits within your budget.",
+        summary="These results come from AudioNova.",
+    )
 
-    assert info.value.code == CHECK_PRODUCT_IDENTITY_REPEATED
+    assert explanation.summary == "These results come from AudioNova."
 
 
 def test_product_name_is_restricted_even_when_brand_is_allowed() -> None:
@@ -1399,18 +1446,17 @@ def test_product_names_remain_restricted_across_products() -> None:
     assert info.value.code == CHECK_PRODUCT_IDENTITY_REPEATED
 
 
-def test_summary_may_not_name_any_brand() -> None:
-    with pytest.raises(ExplanationCheckError) as info:
-        _validate_two_products(
-            "Fits within your budget.",
-            "Fits within your budget.",
-            summary="Preferred brand AudioNova fits within your budget.",
-        )
+def test_unrendered_summary_may_name_a_brand() -> None:
+    explanation = _validate_two_products(
+        "Fits within your budget.",
+        "Fits within your budget.",
+        summary="Preferred brand AudioNova fits within your budget.",
+    )
 
-    assert info.value.code == CHECK_PRODUCT_IDENTITY_REPEATED
+    assert "AudioNova" in explanation.summary
 
 
-def test_summary_rejects_brand_even_when_every_product_reason_mentions_it() -> None:
+def test_unrendered_summary_identity_is_ignored_when_every_reason_mentions_it() -> None:
     shared_reason = "Matches your preferred brand AudioNova."
     products = _two_products()
     products[1].reasons.append(shared_reason)
@@ -1425,10 +1471,13 @@ def test_summary_rejects_brand_even_when_every_product_reason_mentions_it() -> N
         }
     )
 
-    with pytest.raises(ExplanationCheckError) as info:
-        _validate_explanation(raw, products, AssistantIntent(category="Headphones"))
+    explanation = _validate_explanation(
+        raw,
+        products,
+        AssistantIntent(category="Headphones"),
+    )
 
-    assert info.value.code == CHECK_PRODUCT_IDENTITY_REPEATED
+    assert "AudioNova" in explanation.summary
 
 
 def test_product_may_name_only_its_own_brand_not_another_products_brand() -> None:
@@ -1460,14 +1509,13 @@ def test_own_brand_absent_from_own_reasons_is_rejected_even_if_other_reasons_hav
     assert info.value.code == CHECK_PRODUCT_IDENTITY_REPEATED
 
 
-def test_product_name_split_between_summary_and_explanation_is_caught() -> None:
-    with pytest.raises(ExplanationCheckError) as info:
-        _validate_pulsebuds(
-            "Compact fits within your budget.",
-            summary="These results reflect PulseBuds.",
-        )
+def test_product_name_in_unrendered_summary_is_ignored() -> None:
+    explanation = _validate_pulsebuds(
+        "Fits within your budget.",
+        summary="These results reflect PulseBuds Compact.",
+    )
 
-    assert info.value.code == CHECK_PRODUCT_IDENTITY_REPEATED
+    assert "PulseBuds Compact" in explanation.summary
 
 
 def test_product_name_split_across_two_product_explanations_is_caught() -> None:
@@ -1480,24 +1528,22 @@ def test_product_name_split_across_two_product_explanations_is_caught() -> None:
     assert info.value.code == CHECK_PRODUCT_IDENTITY_REPEATED
 
 
-def test_product_name_split_by_punctuation_is_caught() -> None:
-    with pytest.raises(ExplanationCheckError) as info:
-        _validate_pulsebuds(
-            "Compact fits within your budget.",
-            summary="These results reflect PulseBuds;",
-        )
+def test_product_name_split_between_unrendered_summary_and_explanation_is_ignored() -> None:
+    explanation = _validate_pulsebuds(
+        "Fits within your budget.",
+        summary="These results reflect PulseBuds;",
+    )
 
-    assert info.value.code == CHECK_PRODUCT_IDENTITY_REPEATED
+    assert "PulseBuds;" in explanation.summary
 
 
-def test_product_name_in_a_supplied_reason_is_still_prohibited_in_combined_text() -> None:
+def test_product_name_in_an_unrendered_summary_is_not_a_displayed_claim() -> None:
     reasons = ["PulseBuds Compact fits within your budget."]
 
-    with pytest.raises(ExplanationCheckError) as info:
-        _validate_pulsebuds(
-            "Fits within your budget.",
-            summary="Fits within your budget. PulseBuds Compact.",
-            reasons=reasons,
-        )
+    explanation = _validate_pulsebuds(
+        "Fits within your budget.",
+        summary="Fits within your budget. PulseBuds Compact.",
+        reasons=reasons,
+    )
 
-    assert info.value.code == CHECK_PRODUCT_IDENTITY_REPEATED
+    assert "PulseBuds Compact" in explanation.summary

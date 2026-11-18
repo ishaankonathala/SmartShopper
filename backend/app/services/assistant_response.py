@@ -209,7 +209,6 @@ CHECK_PRODUCT_ID_ORDER_MISMATCH: Final[str] = "product_id_order_mismatch"
 CHECK_NUMERIC_CLAIM: Final[str] = "numeric_claim"
 CHECK_UNSUPPORTED_PRODUCT_CLAIM: Final[str] = "unsupported_product_claim"
 CHECK_PRODUCT_IDENTITY_REPEATED: Final[str] = "product_identity_repeated"
-CHECK_SUMMARY_NOT_GROUNDED: Final[str] = "summary_not_grounded"
 CHECK_PRODUCT_EXPLANATION_NOT_GROUNDED: Final[str] = "product_explanation_not_grounded"
 CHECK_UNSUPPORTED_REQUIREMENT_MENTIONED: Final[str] = "unsupported_requirement_mentioned"
 
@@ -447,7 +446,7 @@ def _validate_explanation(
         )
 
     generated_text = " ".join(
-        [explanation.summary, *(item.explanation for item in explanation.product_explanations)]
+        item.explanation for item in explanation.product_explanations
     )
     supplied_reasons = [reason for product in products for reason in product.reasons]
     if re.search(r"\d", generated_text):
@@ -460,15 +459,8 @@ def _validate_explanation(
             CHECK_UNSUPPORTED_PRODUCT_CLAIM,
             "Generated explanation contains an unsupported product claim.",
         )
-    # Product names are checked against the combined text, so a name split
-    # across the summary and explanations is still caught.
+    # Product names are checked across all rendered product explanations.
     if _contains_product_identity(generated_text, _name_sequences(products)):
-        raise ExplanationCheckError(
-            CHECK_PRODUCT_IDENTITY_REPEATED,
-            "Generated explanation repeats product identity details.",
-        )
-    summary_identities = _identity_sequences(products, allowed_brands=[])
-    if _contains_product_identity(explanation.summary, summary_identities):
         raise ExplanationCheckError(
             CHECK_PRODUCT_IDENTITY_REPEATED,
             "Generated explanation repeats product identity details.",
@@ -488,16 +480,6 @@ def _validate_explanation(
     general_words = _GENERAL_EXPLANATION_WORDS | frozenset(
         token for token in _tokens(intent.category or "")
     )
-    if not _is_grounded_in_reasons(
-        explanation.summary,
-        supplied_reasons,
-        identity_sequences=summary_identities,
-        general_words=general_words,
-    ):
-        raise ExplanationCheckError(
-            CHECK_SUMMARY_NOT_GROUNDED,
-            "Generated summary contains claims not grounded in recommendations.",
-        )
     for product, item, identities in zip(
         products,
         explanation.product_explanations,
@@ -565,7 +547,6 @@ _GROUNDING_CHECK_CODES: Final[frozenset[str]] = frozenset(
         CHECK_NUMERIC_CLAIM,
         CHECK_UNSUPPORTED_PRODUCT_CLAIM,
         CHECK_PRODUCT_IDENTITY_REPEATED,
-        CHECK_SUMMARY_NOT_GROUNDED,
         CHECK_PRODUCT_EXPLANATION_NOT_GROUNDED,
         CHECK_UNSUPPORTED_REQUIREMENT_MENTIONED,
     }
