@@ -211,7 +211,9 @@ def test_low_confidence_dna_stays_near_neutral(
         json={"user_id": user_id, "category": "Headphones", "limit": 5, "require_available": True},
     )
     assert response.status_code == 200
-    assert all(product["score"] <= 60 for product in response.json()["products"])
+    products = response.json()["products"]
+    assert all(product["score"] <= 60 for product in products)
+    assert all(product["confidence"] == 0 for product in products)
 
 
 def test_missing_or_malformed_attributes_do_not_crash(
@@ -320,8 +322,268 @@ def test_battery_preference_override_is_full_confidence_and_temporary(
         baseline_product.score_breakdown["battery_life_priority"]
     )
     assert simulated_product.confidence > baseline_product.confidence
+    active_weight = sum(
+        DIMENSION_WEIGHTS[dimension]
+        for dimension in simulated_product.score_breakdown
+    )
+    expected_profile_confidence = round(
+        100
+        * DIMENSION_WEIGHTS["battery_life_priority"]
+        / active_weight,
+        2,
+    )
+    assert simulated_product.confidence == expected_profile_confidence
     assert seeded_client.get(f"/api/profiles/{user_id}").json() == profile_before
     assert seeded_client.get(f"/api/profiles/{user_id}/dna").json() == dna_before
+
+
+def _catalogue_snapshot(db_session: Session):
+    from app.models.product import Product
+
+    return [
+        Product(
+            product_id=row.product_id,
+            name=row.name,
+            brand=row.brand,
+            category=row.category,
+            price=row.price,
+            rating=row.rating,
+            description=row.description,
+            attributes=dict(row.attributes) if isinstance(row.attributes, dict) else row.attributes,
+            stock_quantity=row.stock_quantity,
+            is_active=row.is_active,
+            image_url=row.image_url,
+        )
+        for row in db_session.query(Product).all()
+    ]
+
+
+@pytest.mark.parametrize(
+    ("connectivity", "expected_connectivity"),
+    [("wireless", "wireless"), ("wired", "wired")],
+)
+def test_connectivity_requirement_returns_only_explicitly_compatible_products(
+    seeded_client: TestClient,
+    sample_profile_payload: dict,
+    db_session: Session,
+    connectivity: str,
+    expected_connectivity: str,
+) -> None:
+    from app.schemas.recommendation import RecommendationRequest
+    from app.services.recommendation import generate_recommendations
+
+    user_id = _create_user(seeded_client, sample_profile_payload)
+    response = generate_recommendations(
+        db_session,
+        RecommendationRequest(
+            user_id=user_id,
+            category="Headphones",
+            limit=10,
+            max_budget_override=10000,
+        ),
+        required_connectivity=connectivity,
+    )
+
+    assert response.products
+    assert all(
+        product.attributes["connectivity"] == expected_connectivity
+        for product in _catalogue_snapshot(db_session)
+        if product.product_id in {item.product_id for item in response.products}
+    )
+    assert all(
+        product.product_id != "SS-HP-002" or expected_connectivity == "wireless"
+        for product in response.products
+    )
+
+
+def test_unknown_connectivity_is_excluded_from_explicit_connectivity_request(
+    seeded_client: TestClient,
+    sample_profile_payload: dict,
+    db_session: Session,
+) -> None:
+    from app.schemas.recommendation import RecommendationRequest
+    from app.services.recommendation import generate_recommendations
+
+    user_id = _create_user(seeded_client, sample_profile_payload)
+    snapshot = _catalogue_snapshot(db_session)
+    pulsebuds = next(product for product in snapshot if product.product_id == "SS-HP-002")
+    pulsebuds.attributes.pop("connectivity")
+
+    response = generate_recommendations(
+        db_session,
+        RecommendationRequest(
+            user_id=user_id,
+            category="Headphones",
+            limit=10,
+            max_budget_override=10000,
+        ),
+        required_connectivity="wireless",
+        product_snapshot=snapshot,
+    )
+
+    assert all(product.product_id != "SS-HP-002" for product in response.products)
+    excluded = {item.product_id: item.reason_code for item in response.excluded_products}
+    assert excluded["SS-HP-002"] == "connectivity_unknown"
+
+
+def test_headphone_battery_score_uses_only_headphone_category_data(
+    seeded_client: TestClient,
+    sample_profile_payload: dict,
+    db_session: Session,
+) -> None:
+    from app.schemas.recommendation import RecommendationRequest
+    from app.services.recommendation import DIMENSION_WEIGHTS, generate_recommendations
+
+    user_id = _create_user(seeded_client, sample_profile_payload)
+    request = RecommendationRequest(
+        user_id=user_id,
+        category="Headphones",
+        limit=10,
+        max_budget_override=10000,
+    )
+    snapshot = _catalogue_snapshot(db_session)
+    baseline = generate_recommendations(
+        db_session,
+        request,
+        preference_overrides={"battery_life_priority": 80},
+        product_snapshot=snapshot,
+    )
+    watch = next(product for product in snapshot if product.category == "Smartwatches")
+    watch.attributes["battery_life_hours"] = 10000
+    changed = generate_recommendations(
+        db_session,
+        request,
+        preference_overrides={"battery_life_priority": 80},
+        product_snapshot=snapshot,
+    )
+
+    before_product = next(item for item in baseline.products if item.product_id == "SS-HP-002")
+    after_product = next(item for item in changed.products if item.product_id == "SS-HP-002")
+    assert before_product.attribute_breakdown["battery_life_priority"] == pytest.approx(
+        round(18 / 35 * 100, 2)
+    )
+    assert after_product.attribute_breakdown["battery_life_priority"] == (
+        before_product.attribute_breakdown["battery_life_priority"]
+    )
+    assert after_product.score_breakdown["battery_life_priority"] == (
+        before_product.score_breakdown["battery_life_priority"]
+    )
+    assert after_product.score == before_product.score
+    active_weight = sum(
+        DIMENSION_WEIGHTS[dimension]
+        for dimension in after_product.score_breakdown
+    )
+    assert after_product.score == round(
+        sum(after_product.score_breakdown.values()) / active_weight,
+        2,
+    )
+
+
+def test_missing_battery_data_is_penalized_and_explained_when_requested(
+    seeded_client: TestClient,
+    sample_profile_payload: dict,
+    db_session: Session,
+) -> None:
+    from app.schemas.recommendation import RecommendationRequest
+    from app.services.recommendation import generate_recommendations
+
+    user_id = _create_user(seeded_client, sample_profile_payload)
+    snapshot = _catalogue_snapshot(db_session)
+    pulsebuds = next(product for product in snapshot if product.product_id == "SS-HP-002")
+    pulsebuds.attributes.pop("battery_life_hours")
+
+    response = generate_recommendations(
+        db_session,
+        RecommendationRequest(
+            user_id=user_id,
+            category="Headphones",
+            limit=10,
+            max_budget_override=10000,
+        ),
+        preference_overrides={"battery_life_priority": 80},
+        product_snapshot=snapshot,
+    )
+
+    product = next(item for item in response.products if item.product_id == "SS-HP-002")
+    assert product.attribute_breakdown["battery_life_priority"] == 0
+    assert product.score_breakdown["battery_life_priority"] == 0
+    assert "Battery life is not listed in catalogue data." in product.reasons
+    assert 0 <= product.score <= 100
+
+
+def test_missing_build_quality_is_not_claimed_from_catalogue_rating(
+    seeded_client: TestClient,
+    sample_profile_payload: dict,
+    db_session: Session,
+) -> None:
+    from app.models.product import Product
+
+    user_id = _create_user(seeded_client, sample_profile_payload)
+    dna_response = seeded_client.put(
+        f"/api/profiles/{user_id}/dna",
+        json={
+            "inferred_preferences": {"quality_preference": 90},
+            "confidence_scores": {"quality_preference": 100},
+            "preference_sources": {"quality_preference": "manual"},
+        },
+    )
+    assert dna_response.status_code == 200
+    product_row = (
+        db_session.query(Product)
+        .filter(Product.product_id == "SS-HP-001")
+        .first()
+    )
+    product_row.attributes = {
+        key: value
+        for key, value in product_row.attributes.items()
+        if key != "build_quality"
+    }
+    db_session.commit()
+
+    response = seeded_client.post(
+        "/api/recommendations",
+        json={
+            "user_id": user_id,
+            "category": "Headphones",
+            "limit": 5,
+            "require_available": True,
+        },
+    )
+    assert response.status_code == 200
+    product = next(
+        item
+        for item in response.json()["products"]
+        if item["product_id"] == "SS-HP-001"
+    )
+
+    assert any("build-quality data is unavailable" in reason for reason in product["reasons"])
+    assert any("Catalogue rating 4.5/5 is listed" in reason for reason in product["reasons"])
+    assert not any("good build quality" in reason.casefold() for reason in product["reasons"])
+
+
+def test_explicit_battery_priority_drives_reasons_without_unrequested_portability(
+    seeded_client: TestClient,
+    sample_profile_payload: dict,
+    db_session: Session,
+) -> None:
+    from app.schemas.recommendation import RecommendationRequest
+    from app.services.recommendation import generate_recommendations
+
+    user_id = _create_user(seeded_client, sample_profile_payload)
+    response = generate_recommendations(
+        db_session,
+        RecommendationRequest(
+            user_id=user_id,
+            category="Headphones",
+            limit=10,
+            max_budget_override=10000,
+        ),
+        preference_overrides={"battery_life_priority": 80},
+    )
+    product = next(item for item in response.products if item.product_id == "SS-HP-002")
+
+    assert "Catalogue lists 18 hours of battery life." in product.reasons
+    assert not any("portability" in reason for reason in product.reasons)
 
 
 def test_invalid_limit_is_rejected(client: TestClient, sample_profile_payload: dict) -> None:

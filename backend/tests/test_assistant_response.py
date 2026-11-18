@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.schemas.assistant import AssistantChatRequest, AssistantIntent
+from app.agent.schemas import ComparedProduct, ProductComparisonResult
 from app.schemas.recommendation import RecommendedProduct, RecommendationRequest
 from app.services.assistant_response import (
     _GENERAL_EXPLANATION_WORDS,
@@ -24,6 +25,7 @@ from app.services.assistant_response import (
     EXPLANATION_SYSTEM_PROMPT,
     ExplanationCheckError,
     _GROUNDING_CHECK_CODES,
+    _agent_comparison_answer,
     _content_segments,
     _grounding_failure_note,
     _mentions_unsupported_requirement,
@@ -63,6 +65,72 @@ def test_explanation_prompt_specifies_exact_response_structure() -> None:
     assert "SS-HP-" not in prompt
     assert "PulseBuds" not in prompt
     assert "do not invent product features or factual claims" in prompt
+
+
+def test_value_comparison_recommends_using_listed_price_rating_and_missing_fields() -> None:
+    comparison = ProductComparisonResult(
+        products=[
+            ComparedProduct(
+                product_id="SS-JBL",
+                catalogue_source="curated",
+                name="JBL Tune 500BT",
+                brand="JBL",
+                category="Headphones",
+                price=2971,
+                rating=4.6,
+                rating_count=100,
+                availability_status="available",
+                price_is_historical=False,
+                fields={
+                    "connectivity": "wireless",
+                    "battery_life_hours": 16,
+                    "comfort_score": 80,
+                    "portability": 75,
+                },
+            ),
+            ComparedProduct(
+                product_id="SS-AUGUST",
+                catalogue_source="curated",
+                name="August EP650",
+                brand="August",
+                category="Headphones",
+                price=4841,
+                rating=4.3,
+                rating_count=50,
+                availability_status="available",
+                price_is_historical=False,
+                fields={
+                    "connectivity": "wireless",
+                    "battery_life_hours": None,
+                    "comfort_score": None,
+                    "portability": None,
+                },
+            ),
+        ],
+        compared_fields=[
+            "price",
+            "rating",
+            "connectivity",
+            "battery_life_hours",
+            "comfort_score",
+            "portability",
+        ],
+        missing_fields={"SS-JBL": [], "SS-AUGUST": ["battery_life_hours"]},
+    )
+
+    response = _agent_comparison_answer(
+        1,
+        AssistantIntent(category="Headphones"),
+        "Compare these and explain which is better value.",
+        comparison,
+    )
+
+    assert "JBL Tune 500BT" in response.answer
+    assert "₹1,870 less" in response.answer
+    assert "0.3-point higher catalogue rating" in response.answer
+    assert "battery life not listed" in response.answer
+    assert "comfort not listed" in response.answer
+    assert "portability not listed" in response.answer
 
 
 def _create_user(client, payload: dict) -> int:
@@ -124,8 +192,16 @@ def _mock_groq_client(
                 json={"error": {"message": "provider-private-detail"}},
             )
         messages = body["messages"]
-        is_intent_request = "You extract shopping intent only." in messages[0]["content"]
-        if explanation_http_status is not None and not is_intent_request:
+        is_intent_request = "Extract shopping intent only." in messages[0]["content"]
+        is_planning_request = (
+            "Select exactly one next action from the registered tools."
+            in messages[0]["content"]
+        )
+        if (
+            explanation_http_status is not None
+            and not is_intent_request
+            and not is_planning_request
+        ):
             error = {
                 "type": "invalid_request_error",
                 "code": "json_validate_failed",
@@ -139,6 +215,16 @@ def _mock_groq_client(
             )
         if is_intent_request:
             content = intent.model_dump_json()
+        elif is_planning_request:
+            data = json.loads(messages[1]["content"])
+            content = json.dumps(
+                {
+                    "tool_name": "product_search",
+                    "arguments": {
+                        "limit": min(10, data["requested_limit"]),
+                    },
+                }
+            )
         else:
             data = json.loads(messages[1]["content"])
             if explanation_mode == "timeout":
@@ -264,6 +350,7 @@ def test_successful_intent_extraction_recommendations_and_grounded_explanation(
         category="Headphones",
         comfort_priority=85,
         battery_life_priority=75,
+        product_type_requirement="headphones",
     )
     groq_client, calls = _mock_groq_client(intent)
     request = AssistantChatRequest(user_id=user_id, message="Comfortable headphones.")
@@ -281,6 +368,7 @@ def test_successful_intent_extraction_recommendations_and_grounded_explanation(
             "comfort_priority": 85,
             "battery_life_priority": 75,
         },
+        required_product_type="headphones",
     )
     assert response.user_id == user_id
     assert response.intent == intent
@@ -288,11 +376,15 @@ def test_successful_intent_extraction_recommendations_and_grounded_explanation(
     assert [item.product_id for item in response.recommendations] == [
         item.product_id for item in direct.products
     ]
-    assert response.answer.startswith("These results reflect")
+    answer_text = response.answer.partition("\n\n")[0]
+    assert len(answer_text) <= 160
+    assert all(item.name not in response.answer for item in response.recommendations)
+    assert "rating" not in response.answer
+    assert "recommendation score" not in response.answer
     assert DEMO_CATALOGUE_DISCLAIMER in response.answer
     assert response.fallback_used is False
-    assert len(calls) == 2
-    supplied = json.loads(calls[1]["messages"][1]["content"])
+    assert len(calls) == 3
+    supplied = json.loads(calls[2]["messages"][1]["content"])
     assert supplied["recommendations"][0]["product_id"] == response.recommendations[0].product_id
     assert supplied["recommendations"][0]["name"] == response.recommendations[0].name
     assert supplied["recommendations"][0]["brand"] == response.recommendations[0].brand
@@ -308,16 +400,18 @@ def test_legitimate_general_explanation_is_accepted(
     db_session: Session,
 ) -> None:
     user_id = _create_user(seeded_client, sample_profile_payload)
-    groq_client, _ = _mock_groq_client(AssistantIntent(category="Headphones"))
+    groq_client, _ = _mock_groq_client(
+        AssistantIntent(category="Headphones", comfort_priority=50)
+    )
 
     response = generate_assistant_response(
         db_session,
-        AssistantChatRequest(user_id=user_id, message="Headphones."),
+        AssistantChatRequest(user_id=user_id, message="Comfortable headphones."),
         groq_client=groq_client,
     )
 
     assert response.fallback_used is False
-    assert response.answer.startswith("These results reflect")
+    assert "Its listed reasons align" in response.answer
     assert DEMO_CATALOGUE_DISCLAIMER in response.answer
 
 
@@ -360,7 +454,7 @@ def test_ungrounded_model_summary_is_ignored_when_not_rendered() -> None:
     explanation = _validate_explanation(
         raw,
         [product],
-        AssistantIntent(category="Headphones"),
+        AssistantIntent(category="Headphones", comfort_priority=50),
     )
 
     assert explanation.summary == "These headphones have exceptional noise cancellation."
@@ -374,20 +468,18 @@ def test_api_ignores_ungrounded_summary_and_renders_deterministic_heading(
 ) -> None:
     user_id = _create_user(seeded_client, sample_profile_payload)
     groq_client, _ = _mock_groq_client(
-        AssistantIntent(category="Headphones"),
+        AssistantIntent(category="Headphones", comfort_priority=50),
         explanation_mode="ungrounded_summary",
     )
 
     response = generate_assistant_response(
         db_session,
-        AssistantChatRequest(user_id=user_id, message="Headphones."),
+        AssistantChatRequest(user_id=user_id, message="Comfortable headphones."),
         groq_client=groq_client,
     )
 
     assert response.fallback_used is False
-    assert response.answer.startswith(
-        "These results reflect the ranked recommendations and their stated reasons:"
-    )
+    assert "Its listed reasons align" in response.answer
     assert "waterproof" not in response.answer
     assert "available" not in response.answer
     assert "cost exactly 999 dollars" not in response.answer
@@ -456,10 +548,15 @@ def test_temporary_preference_overrides_reach_recommendation_engine(
     user_id = _create_user(seeded_client, sample_profile_payload)
     intent = AssistantIntent(category="Headphones", **{field: value})
     groq_client, _ = _mock_groq_client(intent)
+    message = {
+        "comfort_priority": "Comfortable headphones.",
+        "brand_loyalty": "Headphones from my preferred brand.",
+        "battery_life_priority": "Headphones with long battery life.",
+    }[field]
 
     response = generate_assistant_response(
         db_session,
-        AssistantChatRequest(user_id=user_id, message="Headphones."),
+        AssistantChatRequest(user_id=user_id, message=message),
         groq_client=groq_client,
     )
     product = next(item for item in response.recommendations if item.product_id == "SS-HP-001")
@@ -484,7 +581,7 @@ def test_budget_override_is_used_only_for_current_recommendations(
 
     response = generate_assistant_response(
         db_session,
-        AssistantChatRequest(user_id=user_id, message="Headphones under ₹2,600."),
+        AssistantChatRequest(user_id=user_id, message="Earbuds under ₹2,600."),
         groq_client=groq_client,
     )
 
@@ -502,13 +599,13 @@ def test_groq_explanation_failure_uses_deterministic_fallback(
 ) -> None:
     user_id = _create_user(seeded_client, sample_profile_payload)
     groq_client, _ = _mock_groq_client(
-        AssistantIntent(category="Headphones"),
+        AssistantIntent(category="Headphones", comfort_priority=50),
         explanation_mode=explanation_mode,
     )
 
     response = generate_assistant_response(
         db_session,
-        AssistantChatRequest(user_id=user_id, message="Headphones."),
+        AssistantChatRequest(user_id=user_id, message="Comfortable headphones."),
         groq_client=groq_client,
     )
 
@@ -516,7 +613,8 @@ def test_groq_explanation_failure_uses_deterministic_fallback(
     assert response.fallback_used is True
     assert any("deterministic explanation" in note for note in response.notes)
     assert DEMO_CATALOGUE_DISCLAIMER in response.answer
-    assert response.recommendations[0].name in response.answer
+    assert response.answer.startswith("These options stay within your current filters")
+    assert response.recommendations[0].name not in response.answer
 
 
 @pytest.mark.parametrize(
@@ -562,13 +660,13 @@ def test_explanation_validation_failures_have_safe_diagnostic_notes(
 ) -> None:
     user_id = _create_user(seeded_client, sample_profile_payload)
     groq_client, _ = _mock_groq_client(
-        AssistantIntent(category="Headphones"),
+        AssistantIntent(category="Headphones", comfort_priority=50),
         explanation_mode=explanation_mode,
     )
 
     response = generate_assistant_response(
         db_session,
-        AssistantChatRequest(user_id=user_id, message="Headphones."),
+        AssistantChatRequest(user_id=user_id, message="Comfortable headphones."),
         groq_client=groq_client,
     )
 
@@ -577,7 +675,8 @@ def test_explanation_validation_failures_have_safe_diagnostic_notes(
     assert expected_note in response.notes
     assert all(detail not in " ".join(response.notes) for detail in private_details)
     assert DEMO_CATALOGUE_DISCLAIMER in response.answer
-    assert response.recommendations[0].name in response.answer
+    assert response.answer.startswith("These options stay within your current filters")
+    assert response.recommendations[0].name not in response.answer
 
 
 def test_missing_category_asks_for_clarification_without_recommendations(
@@ -623,9 +722,118 @@ def test_no_matching_recommendations_returns_explanation_and_exclusion_note(
     assert response.recommendations == []
     assert "couldn't find any eligible Headphones" in response.answer
     assert any("budget_exceeded" in note for note in response.notes)
+    assert response.agent_metadata is not None
+    assert response.agent_metadata.evaluation_outcome == "no_matches"
+    assert any("No catalogue products met every strict filter" in note for note in response.notes)
     assert DEMO_CATALOGUE_DISCLAIMER in response.answer
     assert response.fallback_used is True
-    assert len(calls) == 1
+    assert len(calls) == 2
+
+
+def test_constraint_violation_never_returns_rejected_products(
+    seeded_client,
+    sample_profile_payload: dict,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.agent.orchestrator import AgentOrchestrator
+    from app.agent.state import AgentState, ToolExecutionRecord
+    from app.agent.tools import create_tool_registry
+    from app.models.product import Product
+    from app.services import assistant_response as assistant_response_service
+
+    user_id = _create_user(seeded_client, sample_profile_payload)
+    rejected_product = Product(
+        product_id="SS-WIRED-REJECTED",
+        name="Wired Test Headphones",
+        brand="TestAudio",
+        category="Headphones",
+        price=3000,
+        rating=4.5,
+        description="",
+        attributes={"connectivity": "wired", "product_type": "headphones"},
+        stock_quantity=5,
+        is_active=True,
+    )
+    db_session.add(rejected_product)
+    db_session.flush()
+    intent = AssistantIntent(
+        category="Headphones",
+        max_budget_override=5000,
+        connectivity_requirement="wireless",
+        product_type_requirement="headphones",
+    )
+    search_result = generate_recommendations(
+        db_session,
+        RecommendationRequest(
+            user_id=user_id,
+            category="Headphones",
+            max_budget_override=5000,
+        ),
+        product_snapshot=[rejected_product],
+    )
+    state = AgentState.create(
+        objective="Wireless headphones under ₹5,000.",
+        user_id=user_id,
+        conversation_context=None,
+        constraints=intent,
+        previously_shown_product_ids=[],
+        exclude_previous_products=False,
+        request_limit=5,
+    )
+    state.tool_results.append(
+        ToolExecutionRecord(
+            tool_name="product_search",
+            arguments={"limit": 5},
+            result=search_result,
+        )
+    )
+    evaluation = create_tool_registry().execute(
+        "evaluate_results",
+        {"result_index": 0},
+        state,
+        db_session,
+    )
+    state.tool_results.append(
+        ToolExecutionRecord(
+            tool_name="evaluate_results",
+            arguments={"result_index": 0},
+            result=evaluation,
+            selection_source="evaluation",
+        )
+    )
+    state.latest_evaluation = evaluation
+    state.execution_status = "partial"
+    assert evaluation.outcome == "constraint_violation"
+    agent_result = AgentOrchestrator._result(state)
+    assert agent_result.recommendation_response is None
+    monkeypatch.setattr(
+        assistant_response_service,
+        "_run_agent",
+        lambda *_args, **_kwargs: agent_result,
+    )
+    groq_client, _ = _mock_groq_client(intent)
+
+    response = generate_assistant_response(
+        db_session,
+        AssistantChatRequest(
+            user_id=user_id,
+            message="Wireless headphones under ₹5,000.",
+        ),
+        groq_client=groq_client,
+    )
+
+    assert response.recommendations == []
+    assert "failed a strict catalogue check" in response.answer
+    assert "did not relax" in response.answer
+    assert response.agent_metadata is not None
+    assert response.agent_metadata.evaluation_outcome == "constraint_violation"
+    assert any(
+        event.kind == "evaluation"
+        and event.status == "failed"
+        and "connectivity requirement" in event.summary
+        for event in response.agent_metadata.events
+    )
 
 
 @pytest.mark.parametrize(
@@ -655,17 +863,18 @@ def test_groq_cannot_introduce_unverified_products_or_claims(
 ) -> None:
     user_id = _create_user(seeded_client, sample_profile_payload)
     groq_client, _ = _mock_groq_client(
-        AssistantIntent(category="Headphones"),
+        AssistantIntent(category="Headphones", comfort_priority=50),
         explanation_mode=explanation_mode,
     )
     expected = generate_recommendations(
         db_session,
         RecommendationRequest(user_id=user_id, category="Headphones"),
+        required_product_type="headphones",
     )
 
     response = generate_assistant_response(
         db_session,
-        AssistantChatRequest(user_id=user_id, message="Headphones."),
+        AssistantChatRequest(user_id=user_id, message="Comfortable headphones."),
         groq_client=groq_client,
     )
 
@@ -698,12 +907,12 @@ def test_http_status_is_preserved_in_both_assistant_fallback_notes(
 ) -> None:
     user_id = _create_user(seeded_client, sample_profile_payload)
     groq_client, calls = _mock_groq_client(
-        AssistantIntent(category="Headphones"),
+        AssistantIntent(category="Headphones", comfort_priority=50),
         http_status=status_code,
     )
     response = generate_assistant_response(
         db_session,
-        AssistantChatRequest(user_id=user_id, message="Headphones."),
+        AssistantChatRequest(user_id=user_id, message="Comfortable headphones."),
         groq_client=groq_client,
     )
     diagnostic = (
@@ -720,7 +929,7 @@ def test_http_status_is_preserved_in_both_assistant_fallback_notes(
     assert f"{diagnostic}; a deterministic explanation was used." in response.notes
     assert "provider-private-detail" not in response.answer
     assert "provider-private-detail" not in " ".join(response.notes)
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 @pytest.mark.parametrize(
@@ -751,7 +960,7 @@ def test_explanation_http_failure_note_contains_only_safe_groq_details(
 ) -> None:
     user_id = _create_user(seeded_client, sample_profile_payload)
     groq_client, calls = _mock_groq_client(
-        AssistantIntent(category="Headphones"),
+        AssistantIntent(category="Headphones", comfort_priority=50),
         explanation_http_status=400,
         explanation_error_message=provider_message,
         explanation_failed_generation='{"prompt":"DO_NOT_EXPOSE_PROMPT"}',
@@ -759,7 +968,7 @@ def test_explanation_http_failure_note_contains_only_safe_groq_details(
 
     response = generate_assistant_response(
         db_session,
-        AssistantChatRequest(user_id=user_id, message="Headphones."),
+        AssistantChatRequest(user_id=user_id, message="Comfortable headphones."),
         groq_client=groq_client,
     )
 
@@ -769,12 +978,12 @@ def test_explanation_http_failure_note_contains_only_safe_groq_details(
         "a deterministic explanation was used."
     )
     assert response.fallback_used is True
-    assert response.answer.startswith("Here are the highest-ranked matches")
+    assert response.answer.startswith("These options stay within your current filters")
     assert diagnostic in response.notes
     assert all(value not in " ".join(response.notes) for value in sensitive_values)
     assert "DO_NOT_EXPOSE_PROMPT" not in " ".join(response.notes)
     assert "failed_generation=" not in " ".join(response.notes)
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 def test_explanation_fallback_does_not_swallow_programming_errors(
@@ -784,14 +993,14 @@ def test_explanation_fallback_does_not_swallow_programming_errors(
 ) -> None:
     user_id = _create_user(seeded_client, sample_profile_payload)
     groq_client, _ = _mock_groq_client(
-        AssistantIntent(category="Headphones"),
+        AssistantIntent(category="Headphones", comfort_priority=50),
         explanation_mode="programming_error",
     )
 
     with pytest.raises(RuntimeError, match="simulated programming error"):
         generate_assistant_response(
             db_session,
-            AssistantChatRequest(user_id=user_id, message="Headphones."),
+            AssistantChatRequest(user_id=user_id, message="Comfortable headphones."),
             groq_client=groq_client,
         )
 

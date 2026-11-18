@@ -23,6 +23,7 @@ backend/.ruff_cache/
 backend/smartshopper.db
 backend/*.db
 backend/*.db-journal
+backend/data/amazon_reviews/electronics.parquet
 
 # Node / frontend
 frontend/node_modules/
@@ -40,3 +41,4 @@ yarn-error.log*
 htmlcov/
 .coverage
 .tox/
+backend/app/data/*.parquet

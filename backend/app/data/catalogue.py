@@ -35,6 +35,7 @@ DEMO_PRODUCTS: list[CatalogueProduct] = [
         "rating": 4.5,
         "description": "Demo over-ear headphones emphasising comfort and battery life for travel.",
         "attributes": {
+            "connectivity": "wired",
             "comfort_score": 90,
             "battery_life_hours": 35,
             "noise_cancellation": True,
@@ -55,6 +56,7 @@ DEMO_PRODUCTS: list[CatalogueProduct] = [
         "rating": 4.1,
         "description": "Demo earbuds focused on portability and value.",
         "attributes": {
+            "connectivity": "wireless",
             "comfort_score": 72,
             "battery_life_hours": 18,
             "noise_cancellation": False,
@@ -75,6 +77,7 @@ DEMO_PRODUCTS: list[CatalogueProduct] = [
         "rating": 4.7,
         "description": "Demo premium ANC headphones with high comfort scoring.",
         "attributes": {
+            "connectivity": "wireless",
             "comfort_score": 94,
             "battery_life_hours": 30,
             "noise_cancellation": True,
@@ -95,6 +98,7 @@ DEMO_PRODUCTS: list[CatalogueProduct] = [
         "rating": 3.6,
         "description": "Inactive demo SKU retained for catalogue edge-case testing.",
         "attributes": {
+            "connectivity": "wired",
             "comfort_score": 55,
             "battery_life_hours": 12,
             "noise_cancellation": False,

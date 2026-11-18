@@ -21,6 +21,41 @@ def test_valid_assistant_request_trims_message_and_applies_default_limit() -> No
     assert request.user_id == 1
     assert request.message == "Find comfortable headphones"
     assert request.limit == 10
+    assert request.conversation_context is None
+    assert request.previous_product_ids == []
+
+
+def test_assistant_request_validates_structured_conversation_state_and_product_ids() -> None:
+    request = AssistantChatRequest.model_validate(
+        {
+            "user_id": 1,
+            "message": "Show me more options.",
+            "conversation_context": {
+                "category": "earbuds",
+                "max_budget_override": 5000,
+                "connectivity_requirement": "wireless",
+                "product_type_requirement": "earbuds",
+                "battery_life_priority": 80,
+            },
+            "previous_product_ids": ["SS-HP-002"],
+        }
+    )
+
+    assert request.conversation_context is not None
+    assert request.conversation_context.category == "Headphones"
+    assert request.conversation_context.max_budget_override == 5000
+    assert request.conversation_context.connectivity_requirement == "wireless"
+    assert request.conversation_context.product_type_requirement == "earbuds"
+    assert request.previous_product_ids == ["SS-HP-002"]
+
+
+def test_assistant_request_rejects_duplicate_previous_product_ids() -> None:
+    with pytest.raises(ValidationError):
+        AssistantChatRequest(
+            user_id=1,
+            message="Show me more options.",
+            previous_product_ids=["SS-HP-002", "SS-HP-002"],
+        )
 
 
 @pytest.mark.parametrize("message", ["", " ", "\n\t"])
@@ -70,9 +105,27 @@ def test_valid_assistant_intent_normalizes_catalogue_category_aliases() -> None:
     assert intent.battery_life_priority == 90
 
 
+@pytest.mark.parametrize("connectivity", ["wireless", "wired"])
+def test_assistant_intent_supports_connectivity_requirement(connectivity: str) -> None:
+    intent = AssistantIntent(connectivity_requirement=connectivity)
+
+    assert intent.connectivity_requirement == connectivity
+
+
+def test_assistant_intent_rejects_unknown_connectivity_requirement() -> None:
+    with pytest.raises(ValidationError):
+        AssistantIntent(connectivity_requirement="unknown")
+
+
+def test_assistant_intent_rejects_unknown_product_type_requirement() -> None:
+    with pytest.raises(ValidationError):
+        AssistantIntent(product_type_requirement="accessory")
+
+
 @pytest.mark.parametrize(
     ("alias", "expected"),
     [
+        ("earphones", "Headphones"),
         ("ultrabook", "Laptops"),
         ("smart band", "Smartwatches"),
         ("home appliance", "Home Appliances"),
@@ -160,3 +213,5 @@ def test_assistant_response_reuses_recommended_product_schema() -> None:
     assert response.recommendations[0] is recommendation
     assert response.fallback_used is False
     assert response.notes == []
+    assert response.kind == "shopping"
+    assert response.has_more is False

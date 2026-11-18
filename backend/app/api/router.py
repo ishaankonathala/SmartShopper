@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from app.api import (
+    amazon_catalogue,
     assistant,
     decision_lab,
     health,
@@ -13,6 +14,7 @@ from app.api import (
 )
 
 api_router = APIRouter()
+api_router.include_router(amazon_catalogue.router)
 api_router.include_router(assistant.router)
 api_router.include_router(health.router)
 api_router.include_router(profiles.router)

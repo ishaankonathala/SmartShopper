@@ -9,7 +9,13 @@ from app.core.config import get_settings
 from app.database.base import Base
 
 # Register models on Base.metadata for Alembic autogenerate.
-from app.models import Product, ShopperDNA, ShoppingHistory, UserProfile  # noqa: F401
+from app.models import (  # noqa: F401
+    AmazonCatalogueProduct,
+    Product,
+    ShopperDNA,
+    ShoppingHistory,
+    UserProfile,
+)
 
 config = context.config
 

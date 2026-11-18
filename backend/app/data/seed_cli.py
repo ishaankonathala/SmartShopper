@@ -15,6 +15,7 @@ def main() -> None:
         print("Catalogue seed complete (demo/mock data).")
         print(
             f"  inserted={result['inserted']} "
+            f"updated={result['updated']} "
             f"skipped={result['skipped']} "
             f"seed_file={result['total_in_seed_file']}"
         )

@@ -10,12 +10,10 @@ export function FoundationPage() {
     <section className="space-y-10">
       <div className="max-w-2xl">
         <h2 className="font-display text-2xl font-semibold text-navy sm:text-3xl">
-          System foundation
+          Service status
         </h2>
         <p className="mt-3 text-base leading-relaxed text-navy-muted">
-          This screen verifies that the React client can reach FastAPI and that
-          the SQLite database responds. Feature screens will replace this once
-          the recommendation stack is in place.
+          A quick check that SmartShopper can reach the API and its database.
         </p>
       </div>
 
