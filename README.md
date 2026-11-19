@@ -566,14 +566,42 @@ npm run lint
 
 ---
 
-## How AI was used in this project
+ ## How AI was used in this project
 
-I designed and built SmartShopper as an academic and portfolio project. I used AI tools as assistants along the way, and I want to be specific about where they helped.
+AI tools were used during the development of SmartShopper as supporting
+tools for exploring ideas, solving implementation issues, and improving
+the development process.
+- ChatGPT: Used to discuss architecture and design choices,
+  understand technical concepts, troubleshoot errors, explore
+  alternative implementations, and improve parts of the project
+  documentation.
+- GitHub Copilot: Used for code suggestions, autocomplete,
+  boilerplate, and assistance with repetitive coding and testing
+  tasks.
+AI suggestions were not accepted blindly. I reviewed the generated
+suggestions, modified them where necessary, and made implementation
+decisions based on the project requirements. The architecture,
+integration of components, recommendation workflow, agent orchestration,
+tool execution limits, and overall application behaviour were developed
+and refined throughout the project.
+Developer review and verification
+AI-generated suggestions were treated as starting points and were
+reviewed, modified, or rejected based on the project requirements and
+architecture.
 
-- **ChatGPT** helped me compare design options, such as custom orchestration versus a framework, and drafted parts of this documentation, which I then rewrote and checked against the code.
-- **GitHub Copilot** helped with boilerplate, repetitive test cases, and autocomplete while I was writing code.
+I made the design and integration decisions, worked through
+implementation issues, investigated test failures, and checked that the
+application behaved as expected.
 
-The decisions were mine: the split between LLM planning and deterministic execution, the tool allowlist and execution limits, the data model, the ranking approach, and the checks in the evaluator. I wrote and rewrote the core logic, reviewed every suggestion before accepting it, and rejected the ones that were wrong or didn't fit the design. Tests were run locally, and failures were investigated rather than accepted.
+Verification included: 
+- Backend: 462 tests passed locally.
+- Frontend: Production build completed successfully.
+- Code quality: Frontend lint checks passed.
+- CI: GitHub Actions workflow passed for backend and frontend checks.
+- Manual testing: Tested key application workflows, input validation, and error-handling
+  scenarios.
+
+ 
 
 ---
 
