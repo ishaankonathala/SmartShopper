@@ -605,6 +605,3 @@ Verification included:
 
 ---
 
-## License
-
-Add your license here.
